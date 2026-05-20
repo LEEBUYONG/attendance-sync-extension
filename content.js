@@ -1,763 +1,534 @@
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === "COLLECT_ATTENDANCE_ROWS") {
-    collectAttendanceRows(message.options || {})
-      .then(result => sendResponse(result))
-      .catch(error => {
-        sendResponse({
-          ok: false,
-          error: error.message,
-          stack: error.stack
-        });
-      });
-
-    return true;
+// popup.js 의 executeScript 에서 호출합니다.
+window.__attendanceCollect = async function(options) {
+  try {
+    return await collectAttendanceRows(options || {});
+  } catch (e) {
+    return { ok: false, error: e.message, stack: e.stack };
   }
-});
+};
+
+// ─────────────────────────────────────────────────────
+// 메인 수집 함수
+// ─────────────────────────────────────────────────────
 
 async function collectAttendanceRows(options) {
-  const config = {
-    expectedTotalCount: Number(options.expectedTotalCount || 129),
-    scrollStepPx: Number(options.scrollStepPx || 700),
-    scrollDelayMs: Number(options.scrollDelayMs || 600),
-    maxScrollRounds: Number(options.maxScrollRounds || 100),
+  const cfg = {
+    autoDetectCount : options.autoDetectCount !== false,
+    fixedCount      : Number(options.fixedCount  || 129),
+    scrollStepPx    : Number(options.scrollStepPx   || 600),
+    scrollDelayMs   : Number(options.scrollDelayMs  || 600),
+    maxScrollRounds : Number(options.maxScrollRounds || 150),
     stableRoundLimit: Number(options.stableRoundLimit || 8),
-    debug: Boolean(options.debug)
+    debug           : Boolean(options.debug)
   };
 
   const scrollContainer = findBestScrollContainer();
+  dbg(cfg.debug, "스크롤 컨테이너", descEl(scrollContainer));
 
-  if (!scrollContainer) {
-    throw new Error("스크롤 컨테이너를 찾지 못했습니다.");
+  // ── 1단계: 끝까지 스크롤하며 전체 인원 수 파악 ──────
+  let detectedTotal = cfg.fixedCount;
+
+  if (cfg.autoDetectCount) {
+    detectedTotal = await detectTotalCount(scrollContainer, cfg);
+    dbg(cfg.debug, "자동 감지된 총 인원", detectedTotal);
   }
 
-  debugLog(config.debug, "선택된 스크롤 컨테이너", describeElement(scrollContainer));
-
-  const collectedMap = new Map();
-
-  let previousCount = 0;
-  let stableRounds = 0;
-
+  // ── 2단계: 처음으로 돌아가 데이터 수집 ──────────────
   scrollContainer.scrollTop = 0;
   await sleep(900);
 
-  for (let round = 0; round < config.maxScrollRounds; round++) {
-    const visibleRows = extractVisibleAttendanceRows(config.debug);
+  const map = new Map();
+  let prevCount    = 0;
+  let stableRounds = 0;
 
-    for (const row of visibleRows) {
-      const normalized = normalizeAttendanceRow(row);
-      const key = makeUniqueKey(normalized);
+  for (let round = 0; round < cfg.maxScrollRounds; round++) {
+    const visible = extractVisibleAttendanceRows(cfg.debug);
 
+    for (const row of visible) {
+      const norm = normalizeRow(row);
+      const key  = norm.name;
       if (!key) continue;
 
-      const existing = collectedMap.get(key);
-
-      if (existing) {
-        collectedMap.set(key, mergeRow(existing, normalized));
-      } else {
-        collectedMap.set(key, normalized);
-      }
+      map.set(key, map.has(key) ? mergeRow(map.get(key), norm) : norm);
     }
 
-    const currentCount = collectedMap.size;
-
-    debugLog(config.debug, `round ${round + 1}`, {
-      visibleRows: visibleRows.length,
-      collectedCount: currentCount,
-      scrollTop: scrollContainer.scrollTop,
-      scrollHeight: scrollContainer.scrollHeight,
-      clientHeight: scrollContainer.clientHeight
+    const cur = map.size;
+    dbg(cfg.debug, `round ${round + 1}`, {
+      visible: visible.length, collected: cur,
+      scrollTop: scrollContainer.scrollTop
     });
 
-    if (currentCount >= config.expectedTotalCount) {
-      debugLog(config.debug, "예상 인원 수집 완료", currentCount);
+    if (cur >= detectedTotal) {
+      dbg(cfg.debug, "목표 인원 달성", cur);
       break;
     }
 
-    if (currentCount === previousCount) {
-      stableRounds += 1;
+    if (cur === prevCount) {
+      stableRounds++;
     } else {
       stableRounds = 0;
     }
 
-    if (stableRounds >= config.stableRoundLimit) {
-      debugLog(config.debug, "새 데이터 없음으로 종료", {
-        stableRounds,
-        currentCount
-      });
+    if (stableRounds >= cfg.stableRoundLimit) {
+      dbg(cfg.debug, "새 데이터 없음으로 종료", { stableRounds, cur });
       break;
     }
 
-    previousCount = currentCount;
+    prevCount = cur;
 
-    const beforeScrollTop = scrollContainer.scrollTop;
+    const before = scrollContainer.scrollTop;
+    scrollContainer.scrollTop = before + cfg.scrollStepPx;
+    await sleep(cfg.scrollDelayMs);
 
-    scrollContainer.scrollTop = beforeScrollTop + config.scrollStepPx;
-    await sleep(config.scrollDelayMs);
+    if (isBottom(scrollContainer) || scrollContainer.scrollTop === before) {
+      await sleep(cfg.scrollDelayMs);
 
-    const afterScrollTop = scrollContainer.scrollTop;
-
-    const reachedBottom = isReachedBottom(scrollContainer);
-
-    if (afterScrollTop === beforeScrollTop || reachedBottom) {
-      debugLog(config.debug, "하단 도달 감지", {
-        beforeScrollTop,
-        afterScrollTop,
-        reachedBottom
-      });
-
-      await sleep(config.scrollDelayMs);
-
-      const finalVisibleRows = extractVisibleAttendanceRows(config.debug);
-
-      for (const row of finalVisibleRows) {
-        const normalized = normalizeAttendanceRow(row);
-        const key = makeUniqueKey(normalized);
-
+      const last = extractVisibleAttendanceRows(cfg.debug);
+      for (const row of last) {
+        const norm = normalizeRow(row);
+        const key  = norm.name;
         if (!key) continue;
-
-        const existing = collectedMap.get(key);
-
-        if (existing) {
-          collectedMap.set(key, mergeRow(existing, normalized));
-        } else {
-          collectedMap.set(key, normalized);
-        }
+        map.set(key, map.has(key) ? mergeRow(map.get(key), norm) : norm);
       }
 
-      if (collectedMap.size === currentCount) {
-        stableRounds += 1;
-      }
-
-      if (stableRounds >= 2) {
-        break;
-      }
+      if (map.size === cur) stableRounds++;
+      if (stableRounds >= 2) break;
     }
   }
 
-  const rows = Array.from(collectedMap.values())
-    .filter(row => row.name)
+  const rows = Array.from(map.values())
+    .filter(r => r.name)
     .sort((a, b) => a.name.localeCompare(b.name, "ko"));
 
-  const summary = summarizeRows(rows);
-
   return {
-    ok: true,
+    ok     : true,
     pageUrl: location.href,
-    date: getTodayKoreanDateString(),
-    count: rows.length,
-    summary,
+    date   : todayKST(),
+    count  : rows.length,
+    summary: makeSummary(rows),
     rows
   };
 }
 
-function findBestScrollContainer() {
-  const candidates = Array.from(document.querySelectorAll("div, main, section, article, body, html"));
+// ─────────────────────────────────────────────────────
+// 총 인원 자동 감지
+// 페이지 끝까지 스크롤 → 마지막에 보이는 행 수 기준
+// ─────────────────────────────────────────────────────
 
-  const scrollables = candidates
-    .map(el => {
-      const style = window.getComputedStyle(el);
+async function detectTotalCount(scrollContainer, cfg) {
+  scrollContainer.scrollTop = 0;
+  await sleep(700);
 
-      const overflowY = style.overflowY;
-      const diff = el.scrollHeight - el.clientHeight;
+  const nameSet = new Set();
+  let prevSize  = 0;
+  let stable    = 0;
 
-      const canScroll =
-        diff > 100 &&
-        (
-          overflowY === "auto" ||
-          overflowY === "scroll" ||
-          el === document.body ||
-          el === document.documentElement
-        );
+  for (let i = 0; i < cfg.maxScrollRounds; i++) {
+    const visible = extractVisibleAttendanceRows(false);
 
-      return {
-        el,
-        diff,
-        scrollHeight: el.scrollHeight,
-        clientHeight: el.clientHeight,
-        overflowY
-      };
-    })
-    .filter(item => item.canScroll || item.diff > 300)
-    .sort((a, b) => b.diff - a.diff);
+    for (const row of visible) {
+      const norm = normalizeRow(row);
+      if (norm.name) nameSet.add(norm.name);
+    }
 
-  if (scrollables.length > 0) {
-    return scrollables[0].el;
+    if (nameSet.size === prevSize) {
+      stable++;
+    } else {
+      stable = 0;
+    }
+
+    if (stable >= cfg.stableRoundLimit) break;
+
+    prevSize = nameSet.size;
+
+    const before = scrollContainer.scrollTop;
+    scrollContainer.scrollTop = before + cfg.scrollStepPx;
+    await sleep(cfg.scrollDelayMs);
+
+    if (isBottom(scrollContainer) || scrollContainer.scrollTop === before) {
+      await sleep(cfg.scrollDelayMs);
+      const last = extractVisibleAttendanceRows(false);
+      for (const row of last) {
+        const norm = normalizeRow(row);
+        if (norm.name) nameSet.add(norm.name);
+      }
+      break;
+    }
   }
 
-  return document.scrollingElement || document.documentElement || document.body;
+  // 감지된 이름 수가 너무 적으면 fallback
+  return nameSet.size > 10 ? nameSet.size : cfg.fixedCount;
 }
 
-function extractVisibleAttendanceRows(debug = false) {
+// ─────────────────────────────────────────────────────
+// 스크롤 컨테이너 탐색
+// ─────────────────────────────────────────────────────
+
+function findBestScrollContainer() {
+  const candidates = Array.from(
+    document.querySelectorAll("div, main, section, article, body, html")
+  );
+
+  const scrollable = candidates
+    .map(el => {
+      const style = window.getComputedStyle(el);
+      const diff  = el.scrollHeight - el.clientHeight;
+      const ov    = style.overflowY;
+      const can   = diff > 100 && (ov === "auto" || ov === "scroll");
+      return { el, diff, can };
+    })
+    .filter(x => x.can || x.diff > 300)
+    .sort((a, b) => b.diff - a.diff);
+
+  return scrollable[0]?.el
+    || document.scrollingElement
+    || document.documentElement
+    || document.body;
+}
+
+// ─────────────────────────────────────────────────────
+// 현재 화면에서 출결 행 추출 (4가지 전략 중 최선 선택)
+// ─────────────────────────────────────────────────────
+
+function extractVisibleAttendanceRows(debug) {
   const strategies = [
-    {
-      name: "tableRows",
-      fn: extractFromTableRows
-    },
-    {
-      name: "roleRows",
-      fn: extractFromRoleRows
-    },
-    {
-      name: "gridLikeDivs",
-      fn: extractFromGridLikeDivs
-    },
-    {
-      name: "textBlocks",
-      fn: extractFromTextBlocks
-    }
+    { name: "tableRows",    fn: fromTableRows    },
+    { name: "roleRows",     fn: fromRoleRows     },
+    { name: "gridDivs",     fn: fromGridDivs     },
+    { name: "textBlocks",   fn: fromTextBlocks   }
   ];
 
-  let best = {
-    name: "",
-    rows: []
-  };
+  let best = { name: "", rows: [] };
 
-  for (const strategy of strategies) {
-    const rawRows = strategy.fn();
+  for (const s of strategies) {
+    const parsed = s.fn()
+      .map(parseAttendanceCells)
+      .filter(isValidRow);
 
-    const parsedRows = rawRows
-      .map(cells => parseAttendanceCells(cells))
-      .filter(isValidAttendanceRow);
+    dbg(debug, `strategy:${s.name}`, { raw: s.fn().length, parsed: parsed.length });
 
-    debugLog(debug, `strategy ${strategy.name}`, {
-      raw: rawRows.length,
-      parsed: parsedRows.length,
-      sample: parsedRows.slice(0, 3)
-    });
-
-    if (parsedRows.length > best.rows.length) {
-      best = {
-        name: strategy.name,
-        rows: parsedRows
-      };
-    }
-
-    if (parsedRows.length >= 10) {
-      return parsedRows;
-    }
+    if (parsed.length > best.rows.length) best = { name: s.name, rows: parsed };
+    if (parsed.length >= 10) return parsed;
   }
-
-  debugLog(debug, "best strategy selected", {
-    name: best.name,
-    count: best.rows.length
-  });
 
   return best.rows;
 }
 
-function extractFromTableRows() {
-  const trs = Array.from(document.querySelectorAll("tr"));
-
-  return trs.map(tr => {
-    const cells = Array.from(tr.querySelectorAll("th, td"))
-      .map(cell => cleanText(cell.innerText))
-      .filter(Boolean);
-
-    return cells;
-  }).filter(cells => cells.length >= 2);
+function fromTableRows() {
+  return Array.from(document.querySelectorAll("tr"))
+    .map(tr =>
+      Array.from(tr.querySelectorAll("th, td"))
+        .map(c => clean(c.innerText))
+        .filter(Boolean)
+    )
+    .filter(cells => cells.length >= 2);
 }
 
-function extractFromRoleRows() {
-  const rows = Array.from(document.querySelectorAll('[role="row"]'));
+function fromRoleRows() {
+  return Array.from(document.querySelectorAll('[role="row"]'))
+    .map(row => {
+      const cells = row.querySelectorAll('[role="cell"], [role="gridcell"]');
+      if (cells.length > 0) {
+        return Array.from(cells).map(c => clean(c.innerText)).filter(Boolean);
+      }
+      return Array.from(row.children).map(c => clean(c.innerText)).filter(Boolean);
+    })
+    .filter(cells => cells.length >= 2);
+}
 
-  return rows.map(row => {
-    const directCells = Array.from(row.querySelectorAll('[role="cell"], [role="gridcell"]'));
+function fromGridDivs() {
+  return Array.from(document.querySelectorAll("div"))
+    .filter(el => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 500 || rect.height < 28 || rect.height > 180) return false;
 
-    if (directCells.length > 0) {
-      return directCells
-        .map(cell => cleanText(cell.innerText))
+      const text = clean(el.innerText);
+      if (!text || isHeaderText(text)) return false;
+
+      const hasName   = /[가-힣]{2,5}\s?[A-Za-z]?/.test(text);
+      const hasTime   = /\b\d{1,2}:\d{2}(:\d{2})?\b/.test(text);
+      const hasPhone  = /010[-\s]?\d{3,4}[-\s]?\d{4}/.test(text);
+      const hasStatus = /(입실|퇴실|지각|외출|조퇴|결석|미입실|출석)/.test(text);
+      const hasRate   = /\d{1,3}\s?%/.test(text);
+
+      return hasName && (hasTime || hasPhone || hasStatus || hasRate);
+    })
+    .map(el => {
+      const children = Array.from(el.children)
+        .map(c => clean(c.innerText))
         .filter(Boolean);
-    }
-
-    return Array.from(row.children)
-      .map(child => cleanText(child.innerText))
-      .filter(Boolean);
-  }).filter(cells => cells.length >= 2);
+      return children.length >= 3 ? dedupe(children) : splitCells(clean(el.innerText));
+    })
+    .filter(cells => cells.length >= 2);
 }
 
-function extractFromGridLikeDivs() {
-  const all = Array.from(document.querySelectorAll("div"));
-
-  const candidates = all.filter(el => {
-    const rect = el.getBoundingClientRect();
-
-    if (rect.width < 500) return false;
-    if (rect.height < 28 || rect.height > 180) return false;
-
-    const text = cleanText(el.innerText);
-    if (!text) return false;
-
-    if (isHeaderLikeText(text)) return false;
-
-    const hasName = /[가-힣]{2,5}\s?[A-Za-z]?/.test(text);
-    const hasTime = /\b\d{1,2}:\d{2}(:\d{2})?\b/.test(text);
-    const hasPhone = /010[-\s]?\d{3,4}[-\s]?\d{4}/.test(text);
-    const hasStatus = /(입실|퇴실|지각|외출|조퇴|결석|미입실|출석)/.test(text);
-    const hasRate = /\d{1,3}\s?%/.test(text);
-
-    return hasName && (hasTime || hasPhone || hasStatus || hasRate);
-  });
-
-  return candidates.map(el => {
-    const children = Array.from(el.children)
-      .map(child => cleanText(child.innerText))
-      .filter(Boolean);
-
-    if (children.length >= 3) {
-      return dedupeAdjacent(children);
-    }
-
-    return splitTextToCells(cleanText(el.innerText));
-  }).filter(cells => cells.length >= 2);
-}
-
-function extractFromTextBlocks() {
-  const text = document.body.innerText || "";
-
-  const lines = text
+function fromTextBlocks() {
+  const lines = (document.body.innerText || "")
     .split("\n")
-    .map(cleanText)
+    .map(clean)
     .filter(Boolean);
 
   const rows = [];
-
   for (let i = 0; i < lines.length; i++) {
-    const block = lines.slice(i, i + 12);
+    const block  = lines.slice(i, i + 12);
     const joined = block.join(" ");
+    if (isHeaderText(joined)) continue;
 
-    if (isHeaderLikeText(joined)) continue;
-
-    const hasName = /[가-힣]{2,5}\s?[A-Za-z]?/.test(joined);
-    const hasTime = /\b\d{1,2}:\d{2}(:\d{2})?\b/.test(joined);
-    const hasPhone = /010[-\s]?\d{3,4}[-\s]?\d{4}/.test(joined);
+    const hasName   = /[가-힣]{2,5}\s?[A-Za-z]?/.test(joined);
+    const hasTime   = /\b\d{1,2}:\d{2}(:\d{2})?\b/.test(joined);
+    const hasPhone  = /010[-\s]?\d{3,4}[-\s]?\d{4}/.test(joined);
     const hasStatus = /(입실|퇴실|지각|외출|조퇴|결석|미입실|출석)/.test(joined);
-    const hasRate = /\d{1,3}\s?%/.test(joined);
+    const hasRate   = /\d{1,3}\s?%/.test(joined);
 
     if (hasName && (hasTime || hasPhone || hasStatus || hasRate)) {
       rows.push(block);
       i += 5;
     }
   }
-
   return rows;
 }
 
+// ─────────────────────────────────────────────────────
+// 셀 배열 → 출결 객체 파싱
+// ─────────────────────────────────────────────────────
+
 function parseAttendanceCells(cells) {
-  const cleanedCells = cells
-    .map(cleanText)
-    .filter(Boolean);
+  const cleaned = cells.map(clean).filter(Boolean);
+  const raw     = cleaned.join(" ");
 
-  const rawText = cleanedCells.join(" ");
-
-  const name = extractName(cleanedCells);
-  const phone = extractPhone(rawText);
-  const birth = extractBirth(rawText);
-  const times = extractTimes(rawText);
-
-  const checkInTime = guessCheckInTime(cleanedCells, times);
-  const checkOutTime = guessCheckOutTime(cleanedCells, times);
-  const todayStatus = extractTodayStatus(rawText);
-
-  const attendanceRate = extractRate(rawText, "attendance");
-  const absenceRate = extractRate(rawText, "absence");
+  const name          = extractName(cleaned);
+  const phone         = extractPhone(raw);
+  const birth         = extractBirth(raw);
+  const times         = extractTimes(raw);
+  const checkInTime   = times[0] || "";
+  const checkOutTime  = times[1] || "";
+  const todayStatus   = extractStatus(raw);
+  const attendanceRate = extractRate(raw, "attendance");
+  const absenceRate    = extractRate(raw, "absence");
 
   return {
-    name,
-    phone,
-    birth,
-    checkInTime,
-    checkOutTime,
+    name, phone, birth,
+    checkInTime, checkOutTime,
     todayStatus,
-    attendanceRate,
-    absenceRate,
-    rawText,
-    rawCells: cleanedCells
+    attendanceRate, absenceRate,
+    rawText: raw,
+    rawCells: cleaned
   };
 }
 
+// ─── 이름 추출 ───────────────────────────────────────
+
+const EXCLUDED_WORDS = new Set([
+  "이름","전화번호","생년월일","입실시간","퇴실시간",
+  "오늘 상태","오늘상태","온도 평균","태그","최근 코멘트",
+  "연락 요청","출석률","결석률","단위기간","훈련기간",
+  "입실 완료","퇴실 완료","미입실","지각","외출","조퇴","결석","출석"
+]);
+
 function extractName(cells) {
-  const excludedWords = new Set([
-    "이름",
-    "전화번호",
-    "생년월일",
-    "입실시간",
-    "퇴실시간",
-    "오늘 상태",
-    "오늘상태",
-    "온도 평균",
-    "태그",
-    "최근 코멘트",
-    "연락 요청",
-    "출석률",
-    "결석률",
-    "단위기간",
-    "훈련기간",
-    "입실 완료",
-    "퇴실 완료",
-    "미입실",
-    "지각",
-    "외출",
-    "조퇴",
-    "결석",
-    "출석"
-  ]);
-
   for (const cell of cells) {
-    const value = cleanText(cell);
+    const v = clean(cell);
+    if (!v || v.length > 12) continue;
+    if (EXCLUDED_WORDS.has(v)) continue;
+    if (/010/.test(v)) continue;
+    if (/\b\d{1,2}:\d{2}/.test(v)) continue;
+    if (/%/.test(v)) continue;
+    if (/^\d/.test(v)) continue;
+    if (/(입실|퇴실|지각|외출|조퇴|결석|미입실|출석|상태|요청|코멘트|태그)/.test(v)) continue;
 
-    if (!value) continue;
-    if (excludedWords.has(value)) continue;
-    if (value.length > 12) continue;
-
-    if (/010[-\s]?\d{3,4}[-\s]?\d{4}/.test(value)) continue;
-    if (/\b\d{1,2}:\d{2}(:\d{2})?\b/.test(value)) continue;
-    if (/\d{1,3}\s?%/.test(value)) continue;
-    if (/^\d/.test(value)) continue;
-    if (/(입실|퇴실|지각|외출|조퇴|결석|미입실|출석|상태|요청|코멘트|태그)/.test(value)) continue;
-
-    if (/^[가-힣]{2,5}\s?[A-Za-z]?$/.test(value)) {
-      return value.replace(/\s+/g, "");
-    }
-
-    if (/^[가-힣]{2,5}[A-Za-z]$/.test(value)) {
-      return value;
-    }
+    // 한글 2~5자 + 선택적 알파벳 1자 (중복이름 A/B 구분)
+    if (/^[가-힣]{2,5}[A-Za-z]?$/.test(v)) return v;
   }
 
+  // fallback: 전체 텍스트에서 패턴 탐색
   const joined = cells.join(" ");
-  const match = joined.match(/\b[가-힣]{2,5}\s?[A-Za-z]?\b/);
-
-  if (match) {
-    const candidate = match[0].replace(/\s+/g, "");
-
-    if (!excludedWords.has(candidate)) {
-      return candidate;
-    }
-  }
+  const m = joined.match(/\b[가-힣]{2,5}[A-Za-z]?\b/);
+  if (m && !EXCLUDED_WORDS.has(m[0])) return m[0];
 
   return "";
 }
 
 function extractPhone(text) {
-  const match = text.match(/010[-\s]?\d{3,4}[-\s]?\d{4}/);
-  return match ? match[0].replace(/\s+/g, "-") : "";
+  const m = text.match(/010[-\s]?\d{3,4}[-\s]?\d{4}/);
+  return m ? m[0].replace(/\s/g, "-") : "";
 }
 
 function extractBirth(text) {
-  const match = text.match(/\b\d{2}\.\d{2}\.\d{2}\b|\b\d{6}\b/);
-  return match ? match[0] : "";
+  const m = text.match(/\b\d{2}\.\d{2}\.\d{2}\b|\b\d{6}\b/);
+  return m ? m[0] : "";
 }
 
 function extractTimes(text) {
-  const matches = text.match(/\b\d{1,2}:\d{2}(:\d{2})?\b/g);
-  return matches ? matches.map(normalizeTime) : [];
+  const m = text.match(/\b\d{1,2}:\d{2}(:\d{2})?\b/g);
+  return m ? m.map(normTime) : [];
 }
 
-function guessCheckInTime(cells, times) {
-  if (times.length >= 1) return times[0];
-  return "";
-}
-
-function guessCheckOutTime(cells, times) {
-  if (times.length >= 2) return times[1];
-  return "";
-}
-
-function extractTodayStatus(text) {
-  const statuses = [
-    "입실 완료",
-    "퇴실 완료",
-    "미입실",
-    "외출",
-    "복귀",
-    "조퇴",
-    "지각",
-    "결석",
-    "출석"
+function extractStatus(text) {
+  const list = [
+    "입실 완료","퇴실 완료","미입실","외출","복귀","조퇴","지각","결석","출석"
   ];
-
-  for (const status of statuses) {
-    if (text.includes(status)) return status;
-  }
-
+  for (const s of list) if (text.includes(s)) return s;
   return "";
 }
 
 function extractRate(text, type) {
-  const rateMatches = text.match(/\d{1,3}\s?%(\s?\(\d+\/\d+일\))?/g) || [];
+  const all = text.match(/\d{1,3}\s?%(\s?\(\d+\/\d+일\))?/g) || [];
+  if (!all.length) return "";
 
-  if (rateMatches.length === 0) return "";
+  const keyword = type === "attendance" ? "출석률" : "결석률";
+  const idx = text.indexOf(keyword);
 
-  if (type === "attendance") {
-    const idx = text.indexOf("출석률");
-    if (idx >= 0) {
-      const near = text.slice(idx, idx + 120);
-      const nearMatch = near.match(/\d{1,3}\s?%(\s?\(\d+\/\d+일\))?/);
-      if (nearMatch) return nearMatch[0];
-    }
-
-    return rateMatches[0] || "";
+  if (idx >= 0) {
+    const near = text.slice(idx, idx + 120);
+    const m = near.match(/\d{1,3}\s?%(\s?\(\d+\/\d+일\))?/);
+    if (m) return m[0];
   }
 
-  if (type === "absence") {
-    const idx = text.indexOf("결석률");
-    if (idx >= 0) {
-      const near = text.slice(idx, idx + 120);
-      const nearMatch = near.match(/\d{1,3}\s?%(\s?\(\d+\/\d+일\))?/);
-      if (nearMatch) return nearMatch[0];
-    }
-
-    return rateMatches[1] || "";
-  }
-
-  return "";
+  return type === "attendance" ? (all[0] || "") : (all[1] || "");
 }
 
-function normalizeAttendanceRow(row) {
-  const autoStatus = judgeAutoStatus(row);
+// ─────────────────────────────────────────────────────
+// 정규화 / 자동판정 / 병합
+// ─────────────────────────────────────────────────────
 
+function normalizeRow(row) {
   return {
-    name: row.name || "",
-    phone: row.phone || "",
-    birth: row.birth || "",
-    checkInTime: row.checkInTime || "",
-    checkOutTime: row.checkOutTime || "",
-    todayStatus: row.todayStatus || "",
-    autoStatus,
-    attendanceRate: row.attendanceRate || "",
-    absenceRate: row.absenceRate || "",
-    rawText: row.rawText || ""
+    name           : row.name           || "",
+    phone          : row.phone          || "",
+    birth          : row.birth          || "",
+    checkInTime    : row.checkInTime    || "",
+    checkOutTime   : row.checkOutTime   || "",
+    todayStatus    : row.todayStatus    || "",
+    autoStatus     : judgeStatus(row),
+    attendanceRate : row.attendanceRate || "",
+    absenceRate    : row.absenceRate    || "",
+    rawText        : row.rawText        || ""
   };
 }
 
-function judgeAutoStatus(row) {
-  const todayStatus = row.todayStatus || "";
-
-  if (todayStatus.includes("결석")) return "결석";
-  if (todayStatus.includes("외출")) return "외출";
-  if (todayStatus.includes("조퇴")) return "조퇴";
-  if (todayStatus.includes("미입실")) return "미입실";
-
-  if (!row.checkInTime) return "미입실";
-
-  if (isAfterTime(row.checkInTime, "09:10:00")) {
-    return "지각";
-  }
-
-  if (row.checkOutTime && isBeforeTime(row.checkOutTime, "20:50:00")) {
-    return "조퇴";
-  }
-
+function judgeStatus(row) {
+  const s = row.todayStatus || "";
+  if (s.includes("결석"))   return "결석";
+  if (s.includes("외출"))   return "외출";
+  if (s.includes("조퇴"))   return "조퇴";
+  if (s.includes("미입실")) return "미입실";
+  if (!row.checkInTime)     return "미입실";
+  if (isAfter(row.checkInTime,  "09:10:00")) return "지각";
+  if (row.checkOutTime && isBefore(row.checkOutTime, "20:50:00")) return "조퇴";
   return "정상입실";
 }
 
-function isValidAttendanceRow(row) {
-  if (!row) return false;
-  if (!row.name) return false;
-
-  const invalidNames = new Set([
-    "이름",
-    "출결",
-    "전화번호",
-    "입실시간",
-    "퇴실시간",
-    "오늘상태",
-    "오늘",
-    "상태",
-    "출석률",
-    "결석률"
-  ]);
-
-  if (invalidNames.has(row.name)) return false;
-
-  const hasSignal =
-    row.phone ||
-    row.birth ||
-    row.checkInTime ||
-    row.checkOutTime ||
-    row.todayStatus ||
-    row.attendanceRate ||
-    row.absenceRate;
-
-  return Boolean(hasSignal);
-}
-
-function makeUniqueKey(row) {
-  if (!row || !row.name) return "";
-  return row.name;
-}
-
-function mergeRow(oldRow, newRow) {
+function mergeRow(old, next) {
   return {
-    ...oldRow,
-    ...newRow,
-    name: newRow.name || oldRow.name,
-    phone: newRow.phone || oldRow.phone,
-    birth: newRow.birth || oldRow.birth,
-    checkInTime: newRow.checkInTime || oldRow.checkInTime,
-    checkOutTime: newRow.checkOutTime || oldRow.checkOutTime,
-    todayStatus: newRow.todayStatus || oldRow.todayStatus,
-    autoStatus: newRow.autoStatus || oldRow.autoStatus,
-    attendanceRate: newRow.attendanceRate || oldRow.attendanceRate,
-    absenceRate: newRow.absenceRate || oldRow.absenceRate,
-    rawText: newRow.rawText || oldRow.rawText
+    ...old, ...next,
+    phone          : next.phone          || old.phone,
+    birth          : next.birth          || old.birth,
+    checkInTime    : next.checkInTime    || old.checkInTime,
+    checkOutTime   : next.checkOutTime   || old.checkOutTime,
+    todayStatus    : next.todayStatus    || old.todayStatus,
+    autoStatus     : next.autoStatus     || old.autoStatus,
+    attendanceRate : next.attendanceRate || old.attendanceRate,
+    absenceRate    : next.absenceRate    || old.absenceRate
   };
 }
 
-function summarizeRows(rows) {
-  const summary = {
+function isValidRow(row) {
+  if (!row?.name) return false;
+  if (EXCLUDED_WORDS.has(row.name)) return false;
+
+  return !!(
+    row.phone || row.birth ||
+    row.checkInTime || row.checkOutTime ||
+    row.todayStatus || row.attendanceRate || row.absenceRate
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// 요약 생성
+// ─────────────────────────────────────────────────────
+
+function makeSummary(rows) {
+  const s = {
     total: rows.length,
-    normal: 0,
-    late: 0,
-    notCheckedIn: 0,
-    outing: 0,
-    earlyLeave: 0,
-    absent: 0,
-    unknown: 0
+    normal: 0, late: 0, notCheckedIn: 0,
+    outing: 0, earlyLeave: 0, absent: 0, unknown: 0
   };
-
-  for (const row of rows) {
-    switch (row.autoStatus) {
-      case "정상입실":
-        summary.normal += 1;
-        break;
-      case "지각":
-        summary.late += 1;
-        break;
-      case "미입실":
-        summary.notCheckedIn += 1;
-        break;
-      case "외출":
-        summary.outing += 1;
-        break;
-      case "조퇴":
-        summary.earlyLeave += 1;
-        break;
-      case "결석":
-        summary.absent += 1;
-        break;
-      default:
-        summary.unknown += 1;
-    }
+  for (const r of rows) {
+    if      (r.autoStatus === "정상입실") s.normal++;
+    else if (r.autoStatus === "지각")     s.late++;
+    else if (r.autoStatus === "미입실")   s.notCheckedIn++;
+    else if (r.autoStatus === "외출")     s.outing++;
+    else if (r.autoStatus === "조퇴")     s.earlyLeave++;
+    else if (r.autoStatus === "결석")     s.absent++;
+    else                                   s.unknown++;
   }
-
-  return summary;
+  return s;
 }
 
-function isReachedBottom(el) {
-  return Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 10;
+// ─────────────────────────────────────────────────────
+// 공통 유틸
+// ─────────────────────────────────────────────────────
+
+function clean(v) {
+  return String(v || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function normalizeTime(time) {
-  if (!time) return "";
-
-  const parts = String(time).split(":");
-
-  const hour = String(parts[0] || "00").padStart(2, "0");
-  const minute = String(parts[1] || "00").padStart(2, "0");
-  const second = String(parts[2] || "00").padStart(2, "0");
-
-  return `${hour}:${minute}:${second}`;
+function dedupe(arr) {
+  return arr.filter((v, i) => arr[i - 1] !== v);
 }
 
-function timeToSeconds(time) {
-  const normalized = normalizeTime(time);
-  const [h, m, s] = normalized.split(":").map(Number);
+function splitCells(text) {
+  return clean(text).split(/\s{2,}|\n/).map(clean).filter(Boolean);
+}
 
+function isHeaderText(text) {
+  const words = ["이름","전화번호","입실시간","퇴실시간","오늘 상태","출석률","결석률"];
+  return words.filter(w => text.includes(w)).length >= 4;
+}
+
+function normTime(t) {
+  const p = String(t).split(":");
+  return [
+    String(p[0] || "00").padStart(2, "0"),
+    String(p[1] || "00").padStart(2, "0"),
+    String(p[2] || "00").padStart(2, "0")
+  ].join(":");
+}
+
+function toSec(t) {
+  const [h, m, s] = normTime(t).split(":").map(Number);
   return h * 3600 + m * 60 + s;
 }
 
-function isAfterTime(time, target) {
-  return timeToSeconds(time) > timeToSeconds(target);
+function isAfter(t, target)  { return toSec(t) > toSec(target); }
+function isBefore(t, target) { return toSec(t) < toSec(target); }
+
+function isBottom(el) {
+  return Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 10;
 }
 
-function isBeforeTime(time, target) {
-  return timeToSeconds(time) < timeToSeconds(target);
-}
-
-function getTodayKoreanDateString() {
-  const formatter = new Intl.DateTimeFormat("sv-SE", {
+function todayKST() {
+  return new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  });
-
-  return formatter.format(new Date());
-}
-
-function cleanText(value) {
-  return String(value || "")
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function dedupeAdjacent(values) {
-  const result = [];
-
-  for (const value of values) {
-    if (result[result.length - 1] !== value) {
-      result.push(value);
-    }
-  }
-
-  return result;
-}
-
-function splitTextToCells(text) {
-  return cleanText(text)
-    .split(/\s{2,}|\n/)
-    .map(cleanText)
-    .filter(Boolean);
-}
-
-function isHeaderLikeText(text) {
-  const headerWords = [
-    "이름",
-    "전화번호",
-    "생년월일",
-    "입실시간",
-    "퇴실시간",
-    "오늘 상태",
-    "온도 평균",
-    "태그",
-    "최근 코멘트",
-    "연락 요청",
-    "출석률",
-    "결석률"
-  ];
-
-  let count = 0;
-
-  for (const word of headerWords) {
-    if (text.includes(word)) count += 1;
-  }
-
-  return count >= 4;
+    year: "numeric", month: "2-digit", day: "2-digit"
+  }).format(new Date());
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function debugLog(enabled, message, data) {
+function dbg(enabled, msg, data) {
   if (!enabled) return;
-
-  if (data !== undefined) {
-    console.log(`[Attendance Sync] ${message}`, data);
-  } else {
-    console.log(`[Attendance Sync] ${message}`);
-  }
+  data !== undefined
+    ? console.log(`[AttendanceSync] ${msg}`, data)
+    : console.log(`[AttendanceSync] ${msg}`);
 }
 
-function describeElement(el) {
+function descEl(el) {
   if (!el) return null;
-
   return {
-    tagName: el.tagName,
-    className: el.className,
-    id: el.id,
+    tag: el.tagName, id: el.id,
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,
     scrollTop: el.scrollTop
