@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>출결 싱크</title>
+  <style>
+    body {
+      width: 360px;
+      padding: 16px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #111827;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 0 8px;
+    }
+
+    .desc {
+      font-size: 12px;
+      line-height: 1.5;
+      color: #6b7280;
+      margin-bottom: 12px;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px 12px;
+      margin-top: 8px;
+      border: none;
+      border-radius: 8px;
+      color: #ffffff;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    button:disabled {
+      background: #9ca3af !important;
+      cursor: not-allowed;
+    }
+
+    #previewBtn {
+      background: #4f46e5;
+    }
+
+    #sendBtn {
+      background: #2563eb;
+    }
+
+    #copyBtn {
+      background: #374151;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #f3f4f6;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      max-height: 320px;
+      overflow: auto;
+      margin-top: 12px;
+    }
+
+    .warning {
+      background: #fff7ed;
+      border: 1px solid #fed7aa;
+      color: #9a3412;
+      padding: 8px;
+      border-radius: 8px;
+      font-size: 12px;
+      margin-top: 10px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>출결 싱크 헬퍼</h1>
+
+  <div class="desc">
+    백오피스 출결 페이지에서 실행하세요.<br />
+    가상 스크롤 페이지도 끝까지 스크롤하며 129명 데이터를 수집합니다.
+  </div>
+
+  <button id="previewBtn">1. 수집 미리보기</button>
+  <button id="sendBtn">2. 수집 후 Web App으로 전송</button>
+  <button id="copyBtn">3. 수집 결과 JSON 복사</button>
+
+  <div class="warning">
+    ※ Google Apps Script Web App URL을 아직 넣지 않았다면 전송은 실패합니다.<br />
+    먼저 미리보기와 JSON 복사 기능으로 수집 정확도를 확인하세요.
+  </div>
+
+  <pre id="result">대기 중...</pre>
+
+  <script src="config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

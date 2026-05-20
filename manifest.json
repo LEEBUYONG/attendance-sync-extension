@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Attendance Sync Helper",
+  "version": "0.1.0",
+  "description": "백오피스 출결 데이터를 자동 수집하여 Google Apps Script Web App으로 전송합니다.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://h99backoffice.spartaclub.kr/*",
+    "https://backoffice.spartacodingclub.kr/*",
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "출결 싱크"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://h99backoffice.spartaclub.kr/*",
+        "https://backoffice.spartacodingclub.kr/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
