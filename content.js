@@ -4,9 +4,6 @@
 if (typeof window.__attendanceCollectLoaded === "undefined") {
   window.__attendanceCollectLoaded = true;
 
-// ─────────────────────────────────────────────────────
-// popup.js 의 executeScript 에서 호출
-// ─────────────────────────────────────────────────────
 window.__attendanceCollect = async function(options) {
   try {
     return await collectAttendanceRows(options || {});
@@ -33,14 +30,12 @@ async function collectAttendanceRows(options) {
   const scrollContainer = findBestScrollContainer();
   dbg(cfg.debug, "스크롤 컨테이너", descEl(scrollContainer));
 
-  // 1단계: 끝까지 스크롤하며 전체 인원 수 파악
   let detectedTotal = cfg.fixedCount;
   if (cfg.autoDetectCount) {
     detectedTotal = await detectTotalCount(scrollContainer, cfg);
     dbg(cfg.debug, "자동 감지된 총 인원", detectedTotal);
   }
 
-  // 2단계: 처음으로 돌아가 데이터 수집
   scrollContainer.scrollTop = 0;
   await sleep(900);
 
@@ -94,21 +89,19 @@ async function collectAttendanceRows(options) {
     }
   }
 
-  const allRows     = Array.from(map.values()).filter(r => r.name);
-  const activeRows  = allRows.filter(r => !r.isDropout);
-  const dropoutRows = allRows.filter(r =>  r.isDropout);
-
-  const rows = activeRows.sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  // ★ 중도하차 분리 로직 완전 제거 → 전체 rows 그대로 전송
+  const rows = Array.from(map.values())
+    .filter(r => r.name)
+    .sort((a, b) => a.name.localeCompare(b.name, "ko"));
 
   return {
-    ok      : true,
-    pageUrl : location.href,
-    date    : todayKST(),
-    count   : rows.length,
-    summary : makeSummary(rows),
-    rows,
-    dropouts    : dropoutRows.map(r => r.name),
-    dropoutCount: dropoutRows.length
+    ok     : true,
+    pageUrl: location.href,
+    date   : todayKST(),
+    count  : rows.length,
+    summary: makeSummary(rows),
+    rows
+    // ★ dropouts 필드 제거
   };
 }
 
@@ -182,50 +175,8 @@ function findBestScrollContainer() {
 }
 
 // ─────────────────────────────────────────────────────
-// 중도하차 감지
-// ─────────────────────────────────────────────────────
-
-function detectDropout(el, rawText) {
-  // 전략 1: 텍스트에 "중도하차" 포함
-  const text = rawText || el?.innerText || el?.textContent || "";
-  if (text.includes("중도하차")) return true;
-
-  if (!el) return false;
-
-  // 전략 2: 배지/태그 요소
-  const badges = el.querySelectorAll(
-    '[class*="badge"], [class*="tag"], [class*="chip"], [class*="label"], [class*="status"]'
-  );
-  for (const badge of badges) {
-    const bt = (badge.innerText || badge.textContent || "").trim();
-    if (bt.includes("중도하차") || bt.includes("중도") || bt.includes("하차")) return true;
-  }
-
-  // 전략 3: data 속성
-  const allEls = el.querySelectorAll("*");
-  for (const e of allEls) {
-    for (const attr of e.attributes) {
-      if (
-        attr.value.includes("중도하차") ||
-        attr.value.toLowerCase().includes("dropout") ||
-        attr.value.toLowerCase().includes("withdraw")
-      ) return true;
-    }
-  }
-
-  // 전략 4: 행 배경색이 회색 계열이면서 시간 데이터 없음
-  const bg = window.getComputedStyle(el).backgroundColor;
-  const isGray = [
-    "rgb(128, 128, 128)", "rgb(158, 158, 158)", "rgb(189, 189, 189)",
-    "rgb(224, 224, 224)", "rgb(238, 238, 238)", "rgb(245, 245, 245)"
-  ].some(g => bg === g);
-  if (isGray && !/\d{1,2}:\d{2}/.test(text)) return true;
-
-  return false;
-}
-
-// ─────────────────────────────────────────────────────
 // 출결 행 추출 (4가지 전략)
+// ★ detectDropout 완전 제거 → parseAttendanceCells에서 el 불필요
 // ─────────────────────────────────────────────────────
 
 function extractVisibleAttendanceRows(debug) {
@@ -240,7 +191,7 @@ function extractVisibleAttendanceRows(debug) {
 
   for (const s of strategies) {
     const parsed = s.fn()
-      .map(item => parseAttendanceCells(item.cells, item.el))
+      .map(item => parseAttendanceCells(item.cells))  // ★ el 파라미터 제거
       .filter(isValidRow);
 
     dbg(debug, `strategy:${s.name}`, { raw: s.fn().length, parsed: parsed.length });
@@ -252,12 +203,10 @@ function extractVisibleAttendanceRows(debug) {
   return best.rows;
 }
 
-// ── 전략별 { cells, el } 반환 ──────────────────────
-
 function fromTableRows() {
   return Array.from(document.querySelectorAll("tr"))
     .map(tr => ({
-      el   : tr,
+      el   : null,
       cells: Array.from(tr.querySelectorAll("th, td"))
         .map(c => clean(c.innerText)).filter(Boolean)
     }))
@@ -269,7 +218,7 @@ function fromRoleRows() {
     .map(row => {
       const cells = row.querySelectorAll('[role="cell"], [role="gridcell"]');
       return {
-        el   : row,
+        el   : null,
         cells: cells.length > 0
           ? Array.from(cells).map(c => clean(c.innerText)).filter(Boolean)
           : Array.from(row.children).map(c => clean(c.innerText)).filter(Boolean)
@@ -296,7 +245,7 @@ function fromGridDivs() {
       const children = Array.from(el.children)
         .map(c => clean(c.innerText)).filter(Boolean);
       return {
-        el,
+        el  : null,
         cells: children.length >= 3 ? dedupe(children) : splitCells(clean(el.innerText))
       };
     })
@@ -325,29 +274,25 @@ function fromTextBlocks() {
 }
 
 // ─────────────────────────────────────────────────────
-// 셀 파싱 (el 포함 → 중도하차 감지)
+// 셀 파싱 (★ el / isDropout 완전 제거)
 // ─────────────────────────────────────────────────────
 
-function parseAttendanceCells(cells, el) {
+function parseAttendanceCells(cells) {
   const cleaned = cells.map(clean).filter(Boolean);
   const raw     = cleaned.join(" ");
   const times   = extractTimes(raw);
 
-  // ★ 중도하차 감지: el + rawText 모두 활용
-  const isDropout = detectDropout(el, raw);
-
   return {
-    name           : extractName(cleaned),
-    phone          : extractPhone(raw),
-    birth          : extractBirth(raw),
-    checkInTime    : times[0] || "",
-    checkOutTime   : times[1] || "",
-    todayStatus    : extractStatus(raw),
-    attendanceRate : extractRate(raw, "attendance"),
-    absenceRate    : extractRate(raw, "absence"),
-    isDropout,
-    rawText        : raw,
-    rawCells       : cleaned
+    name          : extractName(cleaned),
+    phone         : extractPhone(raw),
+    birth         : extractBirth(raw),
+    checkInTime   : times[0] || "",
+    checkOutTime  : times[1] || "",
+    todayStatus   : extractStatus(raw),
+    attendanceRate: extractRate(raw, "attendance"),
+    absenceRate   : extractRate(raw, "absence"),
+    rawText       : raw,
+    rawCells      : cleaned
   };
 }
 
@@ -359,8 +304,7 @@ const EXCLUDED_WORDS_SET = new Set([
   "이름","전화번호","생년월일","입실시간","퇴실시간",
   "오늘 상태","오늘상태","온도 평균","태그","최근 코멘트",
   "연락 요청","출석률","결석률","단위기간","훈련기간",
-  "입실 완료","퇴실 완료","미입실","지각","외출","조퇴","결석","출석",
-  "중도하차","중도","하차"
+  "입실 완료","퇴실 완료","미입실","지각","외출","조퇴","결석","출석"
 ]);
 
 function extractName(cells) {
@@ -372,7 +316,7 @@ function extractName(cells) {
     if (/\b\d{1,2}:\d{2}/.test(v)) continue;
     if (/%/.test(v)) continue;
     if (/^\d/.test(v)) continue;
-    if (/(입실|퇴실|지각|외출|조퇴|결석|미입실|출석|상태|요청|코멘트|태그|중도|하차)/.test(v)) continue;
+    if (/(입실|퇴실|지각|외출|조퇴|결석|미입실|출석|상태|요청|코멘트|태그)/.test(v)) continue;
     if (/^[가-힣]{2,5}[A-Za-z]?$/.test(v)) return v;
   }
   const joined = cells.join(" ");
@@ -391,28 +335,19 @@ function extractBirth(text) {
   return m ? m[0] : "";
 }
 
-// ★ 시간 추출 + 정규화 (Date 문자열 포함 처리)
 function extractTimes(text) {
-  // "Sat Dec 30 1899 15:02:00 GMT+..." 형태 먼저 처리
   const dateStrPattern = /[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d+\s+\d{4}\s+(\d{1,2}:\d{2}:\d{2})\s+GMT/g;
   const dateMatches = [];
   let dm;
   while ((dm = dateStrPattern.exec(text)) !== null) {
     dateMatches.push(normTime(dm[1]));
   }
-
-  // 일반 HH:mm 또는 HH:mm:ss 패턴
   const cleaned = text.replace(dateStrPattern, "");
   const normalMatches = (cleaned.match(/\b\d{1,2}:\d{2}(:\d{2})?\b/g) || []).map(normTime);
-
-  // 합쳐서 중복 제거 후 반환
-  const all = [...dateMatches, ...normalMatches];
-  return [...new Set(all)];
+  return [...new Set([...dateMatches, ...normalMatches])];
 }
 
 function extractStatus(text) {
-  // 중도하차는 상태에서 제외
-  if (text.includes("중도하차")) return "";
   const list = ["입실 완료","퇴실 완료","미입실","외출","복귀","조퇴","지각","결석","출석"];
   for (const s of list) if (text.includes(s)) return s;
   return "";
@@ -432,34 +367,32 @@ function extractRate(text, type) {
 }
 
 // ─────────────────────────────────────────────────────
-// 정규화 / 판정 / 병합
+// 정규화 / 판정 / 병합 (★ isDropout 완전 제거)
 // ─────────────────────────────────────────────────────
 
 function normalizeRow(row) {
   return {
-    name           : row.name           || "",
-    phone          : row.phone          || "",
-    birth          : row.birth          || "",
-    checkInTime    : normTime(row.checkInTime  || ""),
-    checkOutTime   : normTime(row.checkOutTime || ""),
-    todayStatus    : row.todayStatus    || "",
-    autoStatus     : judgeStatus(row),
-    attendanceRate : row.attendanceRate || "",
-    absenceRate    : row.absenceRate    || "",
-    isDropout      : row.isDropout      || false,
-    rawText        : row.rawText        || ""
+    name          : row.name           || "",
+    phone         : row.phone          || "",
+    birth         : row.birth          || "",
+    checkInTime   : normTime(row.checkInTime  || ""),
+    checkOutTime  : normTime(row.checkOutTime || ""),
+    todayStatus   : row.todayStatus    || "",
+    autoStatus    : judgeStatus(row),
+    attendanceRate: row.attendanceRate || "",
+    absenceRate   : row.absenceRate    || "",
+    rawText       : row.rawText        || ""
   };
 }
 
 function judgeStatus(row) {
-  if (row.isDropout) return "중도하차";
   const s = row.todayStatus || "";
   if (s.includes("결석"))   return "결석";
   if (s.includes("외출"))   return "외출";
   if (s.includes("조퇴"))   return "조퇴";
   if (s.includes("미입실")) return "미입실";
   if (!row.checkInTime)     return "미입실";
-  if (isAfter(row.checkInTime, "09:10:00"))  return "지각";
+  if (isAfter(row.checkInTime, "09:10:00"))                       return "지각";
   if (row.checkOutTime && isBefore(row.checkOutTime, "20:50:00")) return "조퇴";
   return "정상입실";
 }
@@ -467,15 +400,14 @@ function judgeStatus(row) {
 function mergeRow(old, next) {
   return {
     ...old, ...next,
-    phone          : next.phone          || old.phone,
-    birth          : next.birth          || old.birth,
-    checkInTime    : next.checkInTime    || old.checkInTime,
-    checkOutTime   : next.checkOutTime   || old.checkOutTime,
-    todayStatus    : next.todayStatus    || old.todayStatus,
-    autoStatus     : next.autoStatus     || old.autoStatus,
-    attendanceRate : next.attendanceRate || old.attendanceRate,
-    absenceRate    : next.absenceRate    || old.absenceRate,
-    isDropout      : old.isDropout || next.isDropout  // 한 번이라도 감지되면 유지
+    phone         : next.phone          || old.phone,
+    birth         : next.birth          || old.birth,
+    checkInTime   : next.checkInTime    || old.checkInTime,
+    checkOutTime  : next.checkOutTime   || old.checkOutTime,
+    todayStatus   : next.todayStatus    || old.todayStatus,
+    autoStatus    : next.autoStatus     || old.autoStatus,
+    attendanceRate: next.attendanceRate || old.attendanceRate,
+    absenceRate   : next.absenceRate    || old.absenceRate
   };
 }
 
@@ -495,8 +427,8 @@ function isValidRow(row) {
 
 function makeSummary(rows) {
   const s = {
-    total: rows.length, normal:0, late:0, notCheckedIn:0,
-    outing:0, earlyLeave:0, absent:0, unknown:0
+    total: rows.length, normal: 0, late: 0, notCheckedIn: 0,
+    outing: 0, earlyLeave: 0, absent: 0, unknown: 0
   };
   for (const r of rows) {
     if      (r.autoStatus === "정상입실") s.normal++;
@@ -517,35 +449,21 @@ function makeSummary(rows) {
 function clean(v) {
   return String(v || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
 }
-
 function dedupe(arr) { return arr.filter((v, i) => arr[i - 1] !== v); }
-
 function splitCells(text) {
   return clean(text).split(/\s{2,}|\n/).map(clean).filter(Boolean);
 }
-
 function isHeaderText(text) {
   const words = ["이름","전화번호","입실시간","퇴실시간","오늘 상태","출석률","결석률"];
   return words.filter(w => text.includes(w)).length >= 4;
 }
-
-// ★ 시간 정규화: "1899..." Date 문자열도 처리
 function normTime(t) {
   if (!t || t === "-") return "";
   const s = String(t).trim();
-
-  // "Sat Dec 30 1899 15:02:00 GMT+0827..." 형태
   if (s.includes("1899") || s.includes("GMT")) {
     try {
-      // GMT 오프셋 무시하고 시:분:초만 추출
       const m = s.match(/(\d{1,2}):(\d{2}):(\d{2})\s+GMT/);
-      if (m) {
-        return [
-          m[1].padStart(2,"0"),
-          m[2].padStart(2,"0"),
-          m[3].padStart(2,"0")
-        ].join(":");
-      }
+      if (m) return [m[1].padStart(2,"0"), m[2], m[3]].join(":");
       const d = new Date(s);
       if (!isNaN(d.getTime())) {
         return [
@@ -556,8 +474,6 @@ function normTime(t) {
       }
     } catch(e) {}
   }
-
-  // 일반 HH:mm 또는 HH:mm:ss
   const p = s.split(":");
   if (p.length >= 2) {
     return [
@@ -566,27 +482,21 @@ function normTime(t) {
       String(p[2]||"00").padStart(2,"0")
     ].join(":");
   }
-
   return s;
 }
-
-// 날짜 yy/MM/dd 형태로 반환
 function todayKST() {
   const d = new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Asia/Seoul",
     year: "numeric", month: "2-digit", day: "2-digit"
   }).format(new Date());
-  // "2026-05-20" → "26/05/20"
   return d.slice(2).replace(/-/g, "/");
 }
-
 function toSec(t) {
   const norm = normTime(t);
   if (!norm) return 0;
   const [h,m,s] = norm.split(":").map(Number);
   return h*3600 + m*60 + (s||0);
 }
-
 function isAfter(t, target)  { return toSec(t) > toSec(target); }
 function isBefore(t, target) { return toSec(t) < toSec(target); }
 function isBottom(el) {
@@ -605,7 +515,7 @@ function descEl(el) {
     tag: el.tagName, id: el.id,
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,
-    scrollTop: el.scrollTop
+    scrollTop   : el.scrollTop
   };
 }
 
