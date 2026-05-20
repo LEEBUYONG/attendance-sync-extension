@@ -1,6 +1,6 @@
 const CONFIG = {
   // Google Apps Script Web App 배포 URL (나중에 교체)
-  WEB_APP_URL: "https://script.google.com/macros/s/여기에_구글_웹앱_URL/exec",
+  WEB_APP_URL: "https://script.google.com/macros/s/AKfycbyev-4gXQUzh3SZAKQIGdQcLk_NhT5nvTP14lk2YgX0I9ZLLV9asWuqpETEwmpi9dmh/exec",
 
   // 인원 자동 감지 사용 (true 권장)
   // false로 하면 FIXED_COUNT를 사용
